@@ -94,19 +94,33 @@ for i in range(amount):
 #### <span id = "5">Submission Record</span>
 
 ```json
-"Submission ID": "14967425",
-"User ID": "7fb6e8f8",
-"Create At": "2022-02-24 15:03:31",
-"Problem ID": "14963215",
-"Knowledge Skill": "Python loops",
-"Judge Response": {
-    "testcaseJudgeResults": {
-    "0":{"testcaseScore": 5,  "time": 0.002, ...},
-    "1":{"testcaseScore": 5, "time": 0.002, ...},
-    "2": {"testcaseScore": 5, "time": 0.002, ...}, 
-    },
-    "score": 15, 
-    "success": true
+{
+    "Submission ID": "14967425",
+    "User ID": "7fb6e8f8",
+    "Create At": "2022-02-24 15:03:31",
+    "Problem ID": "14963215",
+    "Knowledge Skill": "Python loops",
+    "Judge Response": {
+        "testcaseJudgeResults": {
+            "0": {
+                "testcaseScore": 5,
+                "time": 0.002,
+                // Other properties...
+            },
+            "1": {
+                "testcaseScore": 5,
+                "time": 0.002,
+                // Other properties...
+            },
+            "2": {
+                "testcaseScore": 5,
+                "time": 0.002,
+                // Other properties...
+            }
+        },
+        "score": 15,
+        "success": true
+    }
 }
 ```
 
