@@ -58,7 +58,7 @@ Additionally, the online judging system automatically records each student's sub
 #### <span id = "4">Dataset Comparison</span>
 | Dataset    | Lang   | Source        | \#students | Code | Click Event | Question | Skills |
 |------------|--------|---------------|------------|------|-------------|----------|--------|
-| PLAGIARISM | C/C++  | ide           | N/A        | $\checkmark$ | $\times$ | $\times$ | $\times$ |
+| PLAGIARISM | C/C++  | ide           | N/A        | &checkmark; | &cross; | $\times$ | $\times$ |
 | BlackBox   | Java   | ide           | 1M         | N/A  | N/A         | N/A      | N/A    |
 | CloudCoder | Python/C | online ide  | 646        | N/A  | N/A         | N/A      | N/A    |
 | Code.org   | Scratch | N/A           | 500K       | N/A  | N/A         | $\checkmark$ | N/A |
@@ -113,6 +113,7 @@ for i in range(amount):
             "2": {
                 "testcaseScore": 5,
                 "time": 0.002,
+
             }
         },
         "score": 15,
