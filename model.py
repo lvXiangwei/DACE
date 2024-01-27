@@ -178,7 +178,7 @@ class DACE(nn.Module):
                 torch.tensor(masked_ans_seq, dtype=torch.long, device=self.device),\
                 question_seq_len
 
-    def question_reorder(self, question_seq, ans_seq, question_seq_len, beta=0.6):
+    def question_reorder(self, question_seq, ans_seq, question_seq_len, beta=0.3):
         num_reorder = math.floor(question_seq_len * beta)
         reorder_begin = random.randint(0, question_seq_len - num_reorder)
         reordered_question_seq = question_seq.cpu().detach().numpy().copy()
