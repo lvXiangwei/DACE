@@ -105,17 +105,14 @@ for i in range(amount):
             "0": {
                 "testcaseScore": 5,
                 "time": 0.002,
-                // Other properties...
             },
             "1": {
                 "testcaseScore": 5,
                 "time": 0.002,
-                // Other properties...
             },
             "2": {
                 "testcaseScore": 5,
                 "time": 0.002,
-                // Other properties...
             }
         },
         "score": 15,
