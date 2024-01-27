@@ -58,15 +58,15 @@ Additionally, the online judging system automatically records each student's sub
 #### <span id = "4">Dataset Comparison</span>
 | Dataset    | Lang   | Source        | \#students | Code | Click Event | Question | Skills |
 |------------|--------|---------------|------------|------|-------------|----------|--------|
-| PLAGIARISM | C/C++  | ide           | N/A        | &checkmark; | &cross; | $\times$ | $\times$ |
+| PLAGIARISM | C/C++  | ide           | N/A        | &checkmark; | &cross; | &cross; | &cross; |
 | BlackBox   | Java   | ide           | 1M         | N/A  | N/A         | N/A      | N/A    |
 | CloudCoder | Python/C | online ide  | 646        | N/A  | N/A         | N/A      | N/A    |
-| Code.org   | Scratch | N/A           | 500K       | N/A  | N/A         | $\checkmark$ | N/A |
-| POJ        | C/C++  | online judge  | 104        | $\times$ | $\times$ | $\times$ | $\times$ |
-| CodeHunt   | Java/C# | online ide   | 258        | $\checkmark$ | $\checkmark$ | $\times$ | $\times$ |
-| CodeBench  | Python | oneline judge | 2714       | $\checkmark$ | $\checkmark$ | $\times$ | $\times$ |
-| BePKT      | C/C++  | online judge  | 906        | $\checkmark$ | $\checkmark$ | $\checkmark$ | $\checkmark$ |
-| **BaiPY**  | Python | online judge  | 110,909    | $\checkmark$ | $\checkmark$ | $\checkmark$ | $\checkmark$ |
+| Code.org   | Scratch | N/A           | 500K       | N/A  | N/A         | &checkmark; | N/A |
+| POJ        | C/C++  | online judge  | 104        | &cross; | &cross; | &cross; | &cross; |
+| CodeHunt   | Java/C# | online ide   | 258        | &checkmark; | &checkmark; | &cross; | &cross; |
+| CodeBench  | Python | oneline judge | 2714       | &checkmark; | &checkmark; | &cross; | &cross; |
+| BePKT      | C/C++  | online judge  | 906        | &checkmark; | &checkmark; | &checkmark; | &checkmark; |
+| **BaiPY**  | Python | online judge  | 110,909    | &checkmark; | &checkmark; | &checkmark; | &checkmark; |
 
 
 #### <span id = "2">Sample Question</span>
