@@ -261,7 +261,7 @@ class DACE(nn.Module):
         task preds: [B, L - 1] 
         student output: [B, L - 1, H] 
         '''
-        output, _ = self.forward(question_seq, ans_seq, question_seq_len, mode='general')
+        output, _ = self.forward(question_seq, ans_seq, question_seq_len, mode='specific')
         student_output = output[:, :-1, :] # [batch_size, seq_len - 1, embed_dim]
         query_pro_embedding = F.embedding(question_seq, self.general_question_embedding, padding_idx=0)[:, 1:, :] # [batch_size, seq_len - 1, embed_dim]
         task_input = torch.cat([student_output, query_pro_embedding], axis=-1) # [batch_size, seq_len - 1, embed_dim * 2]

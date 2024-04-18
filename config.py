@@ -4,7 +4,7 @@ class Config:
   max_seq_length = 200
   embed_path = "embeddings/assist09_embedding.npz"
   n_questions = 17737
-
+  n_skills = 167
   # DACE model 
   batch_size = 128 
   tau = 1

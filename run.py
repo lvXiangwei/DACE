@@ -95,7 +95,7 @@ def main():
     # pretrain
     dace_model = DACE(config)
     # import ipdb; ipdb.set_trace()
-    dace_model.load_state_dict(torch.load(config.save_path + "_epoch_25"))
+    dace_model.load_state_dict(torch.load(config.save_path + "_epoch_25.params"))
     dace_model = dace_model.to(config.device)
     # optimizer = torch.optim.Adam(dace_model.parameters(), lr=config['learning_rate'])
     

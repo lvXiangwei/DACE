@@ -48,6 +48,20 @@ class Net(nn.Module):
         res = torch.sigmoid(self.fc(out))
         return res.squeeze()
 
+def get_pro_skill_dict():
+    pro_skill_file = f"/home/hejiansu/work/KT/aaa_SIGIR2024/DACE/data/{Config.dataset}/pro_skill_dict.json"
+    with open(pro_skill_file, 'r') as file:
+        json_data = file.read()
+
+    # 将JSON数据转换为字典
+    pro_skill_dict = json.loads(json_data)
+    return pro_skill_dict
+
+pro_skill_dict = get_pro_skill_dict()
+
+def pro2skill(key):
+    return pro_skill_dict.get(str(key), 0)
+
 
 class DKT(object):
 
@@ -61,9 +75,14 @@ class DKT(object):
                              max_steps).to(device)
         self.seq_model = seq_model.to(device)
         self.embedding = embedding # index 0 for padding, real question embedding index from 1
+        
+        self.skill_embedding = nn.Embedding(Config.n_skills + 1, hidden_size, padding_idx=0).to(self.embedding.device)
+        
+        
         self.best_dkt = None
         # self.best_model = None
         # self.embedding = embedding
+        
     def add_ans_info(self, seq_input, seq_ans):
         bs, max_step, dim = seq_input.shape
         seq_input_ = seq_input.reshape(-1, dim)
@@ -87,12 +106,19 @@ class DKT(object):
         pad_ans = pad_ans.float().to(device)  # (batch_size, max_len)
         seq_len = seq_len.to(device)  # (batch_size,)
         ####
-        student_state, _ = self.seq_model(pad_seq, pad_ans.long(), seq_len, mode='general')
+        student_state, _ = self.seq_model(pad_seq, pad_ans.long(), seq_len)
         # student_state = 0
+        # import ipdb; ipdb.set_trace()
+        global pro2skill
+        pro_lst = pad_seq.view(-1).tolist()
+        skill_lst = list(map(pro2skill, pro_lst))
+        pad_skill = torch.tensor(skill_lst).view(pad_seq.size()).to(pad_seq.device)
+        skill_embedding = self.skill_embedding(pad_skill)
+
         static_input = F.embedding(
             pad_seq, self.embedding,
             padding_idx=0)  # (batch_size, max_len, embed_dim)
-        seq_input = student_state + static_input
+        seq_input = student_state + static_input + skill_embedding
         # get (q, a) sequence
         # (batch_size, max_tep - 1, embed_dim)
         input_embed = seq_input[:, :-1, :]
