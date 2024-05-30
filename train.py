@@ -285,7 +285,7 @@ def train(opt):
     # test_clean_loader, test_bad_loader = get_test_loader(opt)
 
     logger.info('----------- Training Backdoored Model --------------')
-    for epoch in range(0, 5):
+    for epoch in range(0, opt.tuning_epochs):
         learning_rate(optimizer, epoch, opt)
         train_step_backdoor(opt, train_dataloader, model_backdoor, optimizer_backdoor, criterion, epoch + 1)
         test(opt, test_dataloader, model_backdoor, criterion, epoch + 1)

@@ -23,7 +23,7 @@ class Config:
   # train
   print_freq = 20 # 
   cuda = 1
-  device = "cuda:3"
+  device = "cuda:2"
   lr = 0.001
   momentum = 0.9
   weight_decay = 0.0001
@@ -33,8 +33,8 @@ class Config:
   #####################
   # biased type
   biased_type = "None"  # [None, plagiarism, plagiarism_by_pro, guess]
-  inject_proportion = 0.3 # for reproduction, please set to 0.3
-  p = 0.3 # plagiarism, plagiarism_by_pro: 0.3; guess : 0.5
+  inject_proportion = 0.0 # for reproduction, please set to 0.3
+  p = 0.0 # plagiarism, plagiarism_by_pro: 0.3; guess : 0.5
   #####################
 
   # log and save
