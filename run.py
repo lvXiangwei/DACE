@@ -1,174 +1,352 @@
-import yaml
-import json
-import argparse
+# Code reused from https://github.com/jennyzhang0215/DKVMN.git
+
+import numpy as np
 import torch
-import time
-import copy
-import wandb
-import os
+import math
+from sklearn import metrics
+from utils import model_isPid_type
+from tqdm import tqdm
 
-from model import DACE
-from utils.dataloader import get_backdoor_loader
-from utils.dkt import DKT
-from utils.util import set_logger
-from config import Config as config
+transpose_data_model = {'DACE'}
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def train(dataloader, seq_model, optimizer, device, args, epoch):
-    seq_model.train()
-    loss_list = []
-    # for batch in tqdm(dataloader, desc='training ...'):
-    for batch in dataloader:
-        question_seq, answer_seq, seq_len = batch
-        question_seq = question_seq.to(device)
-        answer_seq = answer_seq.to(device)
-        seq_len = seq_len.to(device)
-
-        loss = seq_model.calculate_loss(question_seq, answer_seq, seq_len)
-        loss_list.append(loss.item())
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    train_loss = sum(loss_list)/len(loss_list)
-    logger.info('epoch: {}, loss: {}'.format(epoch, train_loss))
-    # with open(args.log_path, 'a') as f:
-    #     f.write('epoch: {}, train loss: {}, '.format(epoch, train_loss))
-
-def eval(dataloader, seq_model, device, args):
-    seq_model.eval()
-    loss_list = []
-    with torch.no_grad(): 
-        for batch in dataloader:
-            question_seq, answer_seq, seq_len = batch
-            question_seq = question_seq.to(device)
-            answer_seq = answer_seq.to(device)
-            seq_len = seq_len.to(device)
-            loss = seq_model.calculate_loss(question_seq, answer_seq, seq_len)
-            loss_list.append(loss.item())
-    eval_loss = sum(loss_list)/len(loss_list)
-    logger.info('evaluate loss: {}'.format(eval_loss))
-    # with open(args.log_path, 'a') as f:
-    #     f.write('evaluate loss: {}\n'.format(eval_loss))
-    return eval_loss
+def binaryEntropy(target, pred, mod="avg"):
+    loss = target * np.log(np.maximum(1e-10, pred)) + \
+        (1.0 - target) * np.log(np.maximum(1e-10, 1.0-pred))
+    if mod == 'avg':
+        return np.average(loss)*(-1.0)
+    elif mod == 'sum':
+        return - loss.sum()
+    else:
+        assert False
 
 
-# sweep_configuration = {
-#     'method': 'grid',
-#     'name': 'sweep',
-#     'metric': {'goal': 'maximize', 'name': 'auc'},
-#     'parameters': 
-#     {
-#         # 'lmd1': {'values':[1.0, 0.7, 0.5, 0.3, 0.0]},
-#         # 'lmd2': {'values':[1.0, 0.7, 0.5, 0.3, 0.0]},
-#         # 'lmd3': {'values':[1.0, 0.5, 0]},
-#         # 'lmd4': {'values':[1.0, 0.5, 0]},
-#         'lmd1': {'values':[1.0]},
-#         'lmd2': {'values':[1.0, 0.0]},
-#         'lmd3': {'values':[1.0]},
-#         'lmd4': {'values':[0.5]},
-#      }
-# }
+def compute_auc(all_target, all_pred):
+    #fpr, tpr, thresholds = metrics.roc_curve(all_target, all_pred, pos_label=1.0)
+    return metrics.roc_auc_score(all_target, all_pred)
 
-# sweep_id = wandb.sweep(sweep=sweep_configuration, project='DACE')
-def main():
-    # run = wandb.init('DACE')
-    # with open(args.config_path, "r", encoding="utf-8") as f:
-    #     config = yaml.load(f, Loader=yaml.FullLoader)
-    data_folder = os.path.join('./data', config.dataset)
-    # print(config)
-    # print(data_folder)
-    problem_id_hashmap = json.load(open(f'{data_folder}/problem_id_hashmap.json', "r", encoding="utf-8"))
-    # config['n_questions'] = len(problem_id_hashmap)
-    # config['lmd1'] = 1.0
-    # config['lmd2'] = 0.5
-    # config['lmd3'] = 0.5
-    # config['lmd4'] = 1.0
-    # wandb.config.update(config)
-    # config = wandb.config
-    
-    # load data
-    # train_dataloader, dev_dataloader, test_dataloader = get_dataloader(dataset=config['dataset'], max_step=config['max_seq_length'], batch_size = config['batch_size'], mode='problem')
-    train_dataloader, dev_dataloader, test_dataloader = get_backdoor_loader(dataset=config.dataset,
-                                                        max_step=config.max_seq_length,
-                                                        batch_size=config.batch_size,
-                                                        mode='problem',
-                                                        config=config)
-    # pretrain
-    dace_model = DACE(config)
+
+def compute_accuracy(all_target, all_pred):
+    all_pred[all_pred > 0.5] = 1.0
+    all_pred[all_pred <= 0.5] = 0.0
+    return metrics.accuracy_score(all_target, all_pred)
+
+def get_sequence_z(z, mask):
+    '''
+    z : (bs, seq_len, embed_dim)
+    mask: (bs, seq_len)
+    '''
     # import ipdb; ipdb.set_trace()
-    dace_model.load_state_dict(torch.load(config.save_path + "_epoch_25.params"))
-    dace_model = dace_model.to(config.device)
-    # optimizer = torch.optim.Adam(dace_model.parameters(), lr=config['learning_rate'])
     
-    # best_dace_model = dace_model
-    # best_loss = 9999
-    # stale, patience= 0, 7
-    # print("############# pretrain #############")
-    # for epoch in range(1, config['epochs'] + 1):
-    #     train(train_dataloader, dace_model, optimizer, device, args, epoch)
-    #     eval_loss = eval(dev_dataloader, dace_model, device, args)
-       
-    #     if eval_loss < best_loss:
-    #         stale = 0
-    #         best_loss = eval_loss
-    #         best_dace_model = copy.deepcopy(dace_model)
-    #     else:
-    #         stale += 1
-    #         if stale > patience:
-    #             print(
-    #                 f"No improvment {patience} consecutive epochs, early stopping"
-    #             )
-    #             break
+    mask = mask.unsqueeze(-1)
+    z_hidden = (z * mask).sum(1) / mask.sum()
+    # assert z_hidden.shape[1] == mask.shape[1]
+    return z_hidden 
 
-    # dace_model = best_dace_model
+def train(net, params,  optimizer,  q_data, qa_data, pid_data,  label):
+    net.train()
+    pid_flag, model_type = model_isPid_type(params.model)
+    N = int(math.ceil(len(q_data) / params.batch_size))
+    q_data = q_data.T  # Shape: (200,3633)
+    qa_data = qa_data.T  # Shape: (200,3633)
+    # Shuffle the data
+    shuffled_ind = np.arange(q_data.shape[1])
+    np.random.shuffle(shuffled_ind)
+    q_data = q_data[:, shuffled_ind]
+    qa_data = qa_data[:, shuffled_ind]
 
-    # downtask 
-    logger.info("############# downtask #############")
-    dkt_model = DKT(input_size=config.hidden_size * 2,
-          num_questions=len(problem_id_hashmap),
-          hidden_size=config.hidden_size,
-          num_layers=1,
-          embedding=dace_model.general_question_embedding,
-          max_steps=config.max_seq_length,
-          logger=logger,
-          seq_model = dace_model
-          )
+    if pid_flag:
+        pid_data = pid_data.T
+        pid_data = pid_data[:, shuffled_ind]
 
-    # dkt train
-    dkt_model.train(train_data_loader=train_dataloader,
-            test_data=dev_dataloader,
-            epoch=200)
+    pred_list = []
+    target_list = []
+
+    element_count = 0
+    true_el = 0
+    for idx in range(N):
+        optimizer.zero_grad()
+
+        q_one_seq = q_data[:, idx*params.batch_size:(idx+1)*params.batch_size]
+        if pid_flag:
+            pid_one_seq = pid_data[:, idx *
+                                   params.batch_size:(idx+1) * params.batch_size]
+
+        qa_one_seq = qa_data[:, idx *
+                             params.batch_size:(idx+1) * params.batch_size]
+
+        if model_type in transpose_data_model:
+            input_q = np.transpose(q_one_seq[:, :])  # Shape (bs, seqlen)
+            input_qa = np.transpose(qa_one_seq[:, :])  # Shape (bs, seqlen)
+            target = np.transpose(qa_one_seq[:, :])
+            if pid_flag:
+                # Shape (seqlen, batch_size)
+                input_pid = np.transpose(pid_one_seq[:, :])
+        else:
+            input_q = (q_one_seq[:, :])  # Shape (seqlen, batch_size)
+            input_qa = (qa_one_seq[:, :])  # Shape (seqlen, batch_size)
+            target = (qa_one_seq[:, :])
+            if pid_flag:
+                input_pid = (pid_one_seq[:, :])  # Shape (seqlen, batch_size)
+        target = (target - 1) / params.n_question
+        target_1 = np.floor(target)
+        el = np.sum(target_1 >= -.9)
+        element_count += el
+
+        input_q = torch.from_numpy(input_q).long().to(device)
+        input_qa = torch.from_numpy(input_qa).long().to(device)
+        target = torch.from_numpy(target_1).float().to(device)
+        if pid_flag:
+            input_pid = torch.from_numpy(input_pid).long().to(device)
+
+        if pid_flag:
+            loss, pred, true_ct = net(input_q, input_qa, target, input_pid)
+        else:
+            loss, pred, true_ct = net(input_q, input_qa, target)
+        pred = pred.detach().cpu().numpy()  # (seqlen * batch_size, 1)
+        loss.backward()
+        true_el += true_ct.cpu().numpy()
+
+        if params.maxgradnorm > 0.:
+            torch.nn.utils.clip_grad_norm_(
+                net.parameters(), max_norm=params.maxgradnorm)
+
+        optimizer.step()
+
+        # correct: 1.0; wrong 0.0; padding -1.0
+        target = target_1.reshape((-1,))
+
+        nopadding_index = np.flatnonzero(target >= -0.9)
+        nopadding_index = nopadding_index.tolist()
+        pred_nopadding = pred[nopadding_index]
+        target_nopadding = target[nopadding_index]
+
+        pred_list.append(pred_nopadding)
+        target_list.append(target_nopadding)
+
+    all_pred = np.concatenate(pred_list, axis=0)
+    all_target = np.concatenate(target_list, axis=0)
+
+    loss = binaryEntropy(all_target, all_pred)
+    auc = compute_auc(all_target, all_pred)
+    accuracy = compute_accuracy(all_target, all_pred)
+
+    return loss, accuracy, auc
+
+
+def train_clean(params, model_fb, model_fc, optim_fc, disc, optim_disc, q_data, qa_data, pid_data, label, epoch):
+    model_fb.eval()
+    model_fc.train()
     
-    # dkt test 
-    dkt_model.dkt_model = dkt_model.best_dkt
-    auc, acc = dkt_model.eval(test_dataloader)
-    # wandb.log({
-    #     'auc': auc,
-    #     'acc': acc
-    # })
-    logger.info('On test sest...')
-    logger.info("auc: %.6f" % auc)
-    logger.info("acc: %.6f" % acc)
-    # with open(args.log_path, 'a', encoding='utf-8') as f:
-    #     f.write('On test sest...\n')
-    #     f.write("auc: %.6f\n" % auc)
-    #     f.write("acc: %.6f\n" % acc)
-    
-    # datatime = time.strftime('%Y-%m-%d-%H-%M-%S')
-    # save s2kt model, dkt model and corresponding config
-    # dace_model_path = os.path.join('models', config['dataset'] + f'_s2kt_{datatime}.params')
-    # dkt_model_path = os.path.join('save4/dkt', config.dataset + f'_dkt_{datatime}.params')
-    # config_path = os.path.join('save4/dkt', config.dataset + f'_config_{datatime}.yaml')
-    # torch.save(dace_model.state_dict(), dace_model_path)
-    # dkt_model.save(config.dkt_save_path)
-    # with open(config_path, 'w') as f:
-    #     yaml.dump(config, f)
-    # with open(args.log_path, 'a') as f:
-    #     f.write(f'dkt_model path: {dkt_model_path}, config path: {config_path}\n')
-# main()
-# Start sweep job.
-# wandb.agent(sweep_id, function=main)
+    # net.train()
+    pid_flag, model_type = model_isPid_type(params.model)
+    N = int(math.ceil(len(q_data) / params.batch_size))
+    q_data = q_data.T  # Shape: (200,3633)
+    qa_data = qa_data.T  # Shape: (200,3633)
+    # Shuffle the data
+    shuffled_ind = np.arange(q_data.shape[1])
+    np.random.shuffle(shuffled_ind)
+    q_data = q_data[:, shuffled_ind]
+    qa_data = qa_data[:, shuffled_ind]
 
-if __name__ == '__main__':
-    logger = set_logger(config.dkt_log_path)
-    main()
+    if pid_flag:
+        pid_data = pid_data.T
+        pid_data = pid_data[:, shuffled_ind]
+
+    pred_list = []
+    target_list = []
+
+    # element_count = 0
+    true_el = 0
     
+    def preprocess(idx):
+        q_one_seq = q_data[:, idx*params.batch_size:(idx+1)*params.batch_size]
+        if pid_flag:
+            pid_one_seq = pid_data[:, idx *
+                                   params.batch_size:(idx+1) * params.batch_size]
+        qa_one_seq = qa_data[:, idx *
+                             params.batch_size:(idx+1) * params.batch_size]
+        if model_type in transpose_data_model:
+            input_q = np.transpose(q_one_seq[:, :])  # Shape (bs, seqlen)
+            input_qa = np.transpose(qa_one_seq[:, :])  # Shape (bs, seqlen)
+            target = np.transpose(qa_one_seq[:, :])
+            if pid_flag:
+                # Shape (seqlen, batch_size)
+                input_pid = np.transpose(pid_one_seq[:, :])
+        else:
+            input_q = (q_one_seq[:, :])  # Shape (seqlen, batch_size)
+            input_qa = (qa_one_seq[:, :])  # Shape (seqlen, batch_size)
+            target = (qa_one_seq[:, :])
+            if pid_flag:
+                input_pid = (pid_one_seq[:, :])  # Shape (seqlen, batch_size)
+        target = (target - 1) / params.n_question
+        target_1 = np.floor(target)
+        el = np.sum(target_1 >= -.9)
+        # element_count += el
+
+        input_q = torch.from_numpy(input_q).long().to(device)
+        input_qa = torch.from_numpy(input_qa).long().to(device)
+        target = torch.from_numpy(target_1).float().to(device)
+        if pid_flag:
+            input_pid = torch.from_numpy(input_pid).long().to(device)
+        return input_q, input_qa, target, input_pid, target_1
+        
+    if params.disentangle:
+        for idx in range(N):
+            # optimizer.zero_grad()
+            input_q, input_qa, target, input_pid, _ = preprocess(idx)
+            loss_c, pred, true_ct, z_c = model_fc(input_q, input_qa, target, input_pid, return_output=True)
+            with torch.no_grad():
+                loss_b, _, _, z_b = model_fb(input_q, input_qa, target, input_pid, return_output=True)
+            z_hidden_b = get_sequence_z(z_b, target > -0.9).detach()
+            z_hidden_c = get_sequence_z(z_c, target > -0.9).detach()
+            
+            # max dis_loss
+            dis_loss = - disc(z_hidden_b, z_hidden_c)
+            
+            optim_disc.zero_grad()
+            dis_loss.backward()
+            optim_disc.step()
+            disc.spectral_norm()
+                
+    
+    for idx in range(N):         
+        input_q, input_qa, target, input_pid, target_1 = preprocess(idx)      
+        loss_c, pred, true_ct, z_c = model_fc(input_q, input_qa, target, input_pid, return_output=True)
+        with torch.no_grad():
+            loss_b, _, _, z_b = model_fb(input_q, input_qa, target, input_pid, return_output=True)
+                
+        z_hidden_b = get_sequence_z(z_b, target > -0.9).detach()
+        z_hidden_c = get_sequence_z(z_c, target > -0.9) 
+        
+        dis_loss = disc(z_hidden_b, z_hidden_c)
+            
+        # weight = loss_b/ (loss_b + loss_c.detach() + 1e-8)
+        # import ipdb; ipdb.set_trace()
+        # weight = weight * weight.shape[0] / torch.sum(weight)
+        # loss = torch.mean(weight * loss_c)
+        loss = loss_c
+        if params.disentangle:
+            loss += dis_loss
+          
+        pred = pred.detach().cpu().numpy()  # (seqlen * batch_size, 1)
+        true_el += true_ct.cpu().numpy()
+
+        optim_fc.zero_grad()
+        loss.backward()
+        optim_fc.step()
+
+        # correct: 1.0; wrong 0.0; padding -1.0
+        target = target_1.reshape((-1,))
+
+        nopadding_index = np.flatnonzero(target >= -0.9)
+        nopadding_index = nopadding_index.tolist()
+        pred_nopadding = pred[nopadding_index]
+        target_nopadding = target[nopadding_index]
+
+        pred_list.append(pred_nopadding)
+        target_list.append(target_nopadding)
+
+    all_pred = np.concatenate(pred_list, axis=0)
+    all_target = np.concatenate(target_list, axis=0)
+
+    loss = binaryEntropy(all_target, all_pred)
+    auc = compute_auc(all_target, all_pred)
+    accuracy = compute_accuracy(all_target, all_pred)
+
+    # print("epoch ", epoch + 1)
+    # print("valid_auc\t", valid_auc, "\ttrain_auc\t", train_auc)
+    # print("valid_accuracy\t", valid_accuracy,
+    #         "\ttrain_accuracy\t", train_accuracy)
+    # print("valid_loss\t", valid_loss, "\ttrain_loss\t", train_loss)
+    
+    return loss, accuracy, auc
+
+
+def test(net, params, optimizer, q_data, qa_data, pid_data, label):
+    # dataArray: [ array([[],[],..])] Shape: (3633, 200)
+    pid_flag, model_type = model_isPid_type(params.model)
+    net.eval()
+    N = int(math.ceil(float(len(q_data)) / float(params.batch_size)))
+    q_data = q_data.T  # Shape: (200,3633)
+    qa_data = qa_data.T  # Shape: (200,3633)
+    if pid_flag:
+        pid_data = pid_data.T
+    seq_num = q_data.shape[1]
+    pred_list = []
+    target_list = []
+
+    count = 0
+    true_el = 0
+    element_count = 0
+    for idx in range(N):
+
+        q_one_seq = q_data[:, idx*params.batch_size:(idx+1)*params.batch_size]
+        if pid_flag:
+            pid_one_seq = pid_data[:, idx *
+                                   params.batch_size:(idx+1) * params.batch_size]
+        input_q = q_one_seq[:, :]  # Shape (seqlen, batch_size)
+        qa_one_seq = qa_data[:, idx *
+                             params.batch_size:(idx+1) * params.batch_size]
+        input_qa = qa_one_seq[:, :]  # Shape (seqlen, batch_size)
+
+        # print 'seq_num', seq_num
+        if model_type in transpose_data_model:
+            # Shape (seqlen, batch_size)
+            input_q = np.transpose(q_one_seq[:, :])
+            # Shape (seqlen, batch_size)
+            input_qa = np.transpose(qa_one_seq[:, :])
+            target = np.transpose(qa_one_seq[:, :])
+            if pid_flag:
+                input_pid = np.transpose(pid_one_seq[:, :])
+        else:
+            input_q = (q_one_seq[:, :])  # Shape (seqlen, batch_size)
+            input_qa = (qa_one_seq[:, :])  # Shape (seqlen, batch_size)
+            target = (qa_one_seq[:, :])
+            if pid_flag:
+                input_pid = (pid_one_seq[:, :])
+        target = (target - 1) / params.n_question
+        target_1 = np.floor(target)
+        #target = np.random.randint(0,2, size = (target.shape[0],target.shape[1]))
+
+        input_q = torch.from_numpy(input_q).long().to(device)
+        input_qa = torch.from_numpy(input_qa).long().to(device)
+        target = torch.from_numpy(target_1).float().to(device)
+        if pid_flag:
+            input_pid = torch.from_numpy(input_pid).long().to(device)
+
+        with torch.no_grad():
+            if pid_flag:
+                loss, pred, ct = net(input_q, input_qa, target, input_pid)
+            else:
+                loss, pred, ct = net(input_q, input_qa, target)
+        pred = pred.cpu().numpy()  # (seqlen * batch_size, 1)
+        true_el += ct.cpu().numpy()
+        #target = target.cpu().numpy()
+        if (idx + 1) * params.batch_size > seq_num:
+            real_batch_size = seq_num - idx * params.batch_size
+            count += real_batch_size
+        else:
+            count += params.batch_size
+
+        # correct: 1.0; wrong 0.0; padding -1.0
+        target = target_1.reshape((-1,))
+        nopadding_index = np.flatnonzero(target >= -0.9)
+        nopadding_index = nopadding_index.tolist()
+        pred_nopadding = pred[nopadding_index]
+        target_nopadding = target[nopadding_index]
+
+        element_count += pred_nopadding.shape[0]
+        # print avg_loss
+        pred_list.append(pred_nopadding)
+        target_list.append(target_nopadding)
+
+    assert count == seq_num, "Seq not matching"
+
+    all_pred = np.concatenate(pred_list, axis=0)
+    all_target = np.concatenate(target_list, axis=0)
+    loss = binaryEntropy(all_target, all_pred)
+    auc = compute_auc(all_target, all_pred)
+    accuracy = compute_accuracy(all_target, all_pred)
+
+    return loss, accuracy, auc

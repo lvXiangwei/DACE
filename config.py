@@ -1,89 +1,72 @@
-class Config:
-  # dataset
-  dataset = "assist09"
-  max_seq_length = 200
-  embed_path = "embeddings/assist09_embedding.npz"
-  n_questions = 17737
-  n_skills = 167
-  # DACE model 
-  batch_size = 128 
-  tau = 1
-  sim = "dot"
-  n_layers = 2
-  n_heads = 2
-  hidden_size = 128 # last hidden dim
-  inner_size = 256
-  hidden_dropout_prob = 0.5
-  attn_dropout_prob = 0.5
-  hidden_act = "gelu"
-  layer_norm_eps = 0.000000000001
-  initializer_range = 0.02
-  loss_type = "CE"
-  
-  # train
-  print_freq = 20 # 
-  cuda = 1
-  device = "cuda:2"
-  lr = 0.001
-  momentum = 0.9
-  weight_decay = 0.0001
-  tuning_epochs = 100 # maximum epochs
-  disentangle = 1
-  
-  #####################
-  # biased type
-  biased_type = "None"  # [None, plagiarism, plagiarism_by_pro, guess]
-  inject_proportion = 0.0 # for reproduction, please set to 0.3
-  p = 0.0 # plagiarism, plagiarism_by_pro: 0.3; guess : 0.5
-  #####################
+data_statics = {
+  "assist09":{
+    'n_pid': 17737,
+    'n_question': 167,
+    'seqlen': 200,
+    'data_dir': '../data/assist09',
+    'data_name': 'assist09' + '_pid'
+  },"ednet":{
+    'n_pid': 12103,
+    'n_question': 1598,
+    'seqlen': 200,
+    'data_dir': '../data/ednet',
+    'data_name': 'ednet' + '_pid'
+  },"assist12":{
+    'n_pid': 53070,
+    'n_question': 265,
+    'seqlen': 200,
+    'data_dir': '../data/assist12',
+    'data_name': 'assist12' + '_pid'
+  },"python":{
+    'n_pid': 1149,
+    'n_question': 73,
+    'seqlen': 200,
+    'data_dir': '../data/python',
+    'data_name': 'python' + '_pid'
+  }
+}
 
-  # log and save
-  log_path = f'logs/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}.log'
-  save_path = f'save/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}'
-  dkt_log_path = f'logs/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}_dkt.log'
-  dkt_save_path = f'save/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}_dkt'
 
-# class Config:
-#   # dataset
-#   dataset = "ednet"
-#   max_seq_length = 200
-#   embed_path = "embeddings/ednet_embedding.npz"
-#   n_questions = 12103
-
-#   # DACE model 
-#   batch_size = 128 
-#   tau = 1
-#   sim = "dot"
-#   n_layers = 2
-#   n_heads = 2
-#   hidden_size = 128 # last hidden dim
-#   inner_size = 256
-#   hidden_dropout_prob = 0.5
-#   attn_dropout_prob = 0.5
-#   hidden_act = "gelu"
-#   layer_norm_eps = 0.000000000001
-#   initializer_range = 0.02
-#   loss_type = "CE"
+class Config:  
+    dataset='assist09'
+     ### dv_train
+    bias_type = "None" # plag-by_pro, guess
+    bias_p=0.0 # plag:0.5; plag-by_pro:0.5; guess:0.3
+    inject_p=0.0
+    
+    
+    file_name = f"{dataset}_bias_{bias_type}_bias_p_{bias_p}.log"
+    fb_epoch=10
+    max_iter=300
+    
+   
+    disentangle=1
+    model="DACE_pid"
+    
+    n_question=data_statics[dataset]['n_question']
+    n_pid=data_statics[dataset]['n_pid']
+    seqlen=data_statics[dataset]['seqlen']
+    data_dir=data_statics[dataset]['data_dir']
+    data_name=data_statics[dataset]['data_name']
+    model_type="DACE"
+    save=dataset
+    
+    
+    ### common
+    train_set=1
+    seed=224
+    optim='adam'
+    batch_size=32
+    lr=1e-5
+    maxgradnorm=-1
+    final_fc_dim=512
+    l2=1e-5
+    
+    ### Knowledge state extractor
+    d_model=256
+    d_ff=1024
+    dropout=0.1
+    n_block=1
+    n_head=8
+    kq_same=1
   
-#   # train
-#   print_freq = 20 # 
-#   cuda = 1
-#   device = "cuda:3"
-#   lr = 0.001
-#   momentum = 0.9
-#   weight_decay = 0.0001
-#   tuning_epochs = 100 # maximum epochs
-#   disentangle = 1
-  
-#  #####################
-#  # biased type
-#  biased_type = "None"  # [None, plagiarism, plagiarism_by_pro, guess]
-#  inject_proportion = 0.3 # for reproduction, please set to 0.3
-#  p = 0.3 # plagiarism, plagiarism_by_pro: 0.3; guess : 0.5
-#  #####################
-
-#   # log and save
-#   log_path = f'logs/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}.log'
-#   save_path = f'save/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}'
-#   dkt_log_path = f'logs/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}_dkt.log'
-#   dkt_save_path = f'save/{dataset}_{biased_type}_injcet_{inject_proportion}_p_{p}_dkt'

@@ -1,421 +1,438 @@
-import math
-import random
-import numpy as np
 import torch
-from torch import nn 
-import torch.nn.functional  as F
-from utils.layers import TransformerEncoder
+from torch import nn
+from torch.nn.init import xavier_uniform_
+from torch.nn.init import constant_
+from torch.nn.init import xavier_normal_
+import math
+import torch.nn.functional as F
+from enum import IntEnum
+import numpy as np
+# from utils import set_seed
+import random
+from config import Config
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = "cpu"
+
+def set_seed(seed):
+    '''
+    >>> set_seed(42)
+    '''
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available(): # GPU operation have separate seed
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    # Additionally, some operations on a GPU are implemented stochastic for efficiency
+    # We want to ensure that all operations are deterministic on GPU (if used) for reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+class Dim(IntEnum):
+    batch = 0
+    seq = 1
+    feature = 2
+
+    
 class DACE(nn.Module):
-    # r"""Implementation of `Contrastive Learning for Sequential Recommendation` model.
-    # """
-    
-    def __init__(self, config):
-        super(DACE, self).__init__()
-        
-        # load parameters info
-        self.n_layers = config.n_layers
-        self.n_heads = config.n_heads
-        self.hidden_size = config.hidden_size  # same as embedding_size
-        self.inner_size = config.inner_size  # the dimensionality in feed-forward layer
-        self.hidden_dropout_prob = config.hidden_dropout_prob
-        self.attn_dropout_prob = config.attn_dropout_prob
-        self.hidden_act = config.hidden_act
-        self.layer_norm_eps = config.layer_norm_eps
-        
-        self.batch_size = config.batch_size
-
-        # self.lmd1 = config['lmd1']
-        # self.lmd2 = config['lmd2']
-        # self.lmd3 = config['lmd3']
-        # self.lmd4 = config['lmd4']
-
-        self.tau = config.tau
-        self.sim = config.sim
-    
-        self.initializer_range = config.initializer_range
-        self.loss_type = config.loss_type
-        
-        self.n_questions = config.n_questions # 12103 assist0 17737
-        # self.n_questions = 17737
-        self.max_seq_length = config.max_seq_length
-        
-        self.device = config.device
-        
-        # define layers and loss
-        self.question_embedding = nn.Embedding(self.n_questions + 1, self.hidden_size, padding_idx=0).to(self.device) # plus 1 for padding
-        
-    
-        ### add static_question_embedding
-        general_question_embedding = torch.torch.from_numpy(np.load(config.embed_path)['pro_final_repre'])
-        zero_tensor = torch.zeros([1, general_question_embedding.shape[1]])
-        self.general_question_embedding = torch.cat([zero_tensor, general_question_embedding], axis=0).to(self.device)
-        
-        self.ans_embedding = nn.Embedding(3, self.hidden_size, padding_idx=0).to(self.device) # ans embedding
-        self.position_embedding = nn.Embedding(self.max_seq_length, self.hidden_size).to(self.device) 
-
-        self.trm_encoder = TransformerEncoder(
-            n_layers=self.n_layers,
-            n_heads=self.n_heads,
-            hidden_size=self.hidden_size,
-            inner_size=self.inner_size,
-            hidden_dropout_prob=self.hidden_dropout_prob,
-            attn_dropout_prob=self.attn_dropout_prob,
-            hidden_act=self.hidden_act,
-            layer_norm_eps=self.layer_norm_eps
-        ).to(self.device)
-
-         ### task loss
-        self.task_head = nn.Linear(self.hidden_size * 2, 1).to(self.device) # for task loss
-        self.bce_fct = nn.BCELoss()
-
-        self.LayerNorm = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps).to(self.device)
-        self.dropout = nn.Dropout(self.hidden_dropout_prob)
-        # self.loss_fct = nn.CrossEntropyLoss()
-        
-        self.mask_default = self.mask_correlated_samples(batch_size=self.batch_size)
-        self.nce_fct = nn.CrossEntropyLoss()
-         
-        # parameters initialization
-        self.apply(self._init_weights)
-        
-    
-    def _init_weights(self, module):
-        """ Initialize the weights """
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-        if isinstance(module, nn.Linear) and module.bias is not None:
-            module.bias.data.zero_()
-    
-    
-    def get_attention_mask(self, question_seq):
-       
-        """Generate left-to-right uni-directional attention mask for multi-head attention."""
-        attention_mask = (question_seq > 0).long()  # [batch_size, seq_len]
-        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
-        # mask for left-to-right unidirectional
-        max_len = attention_mask.size(-1)
-        attn_shape = (1, max_len, max_len)
-        subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).to(self.device)  # torch.uint8
-        subsequent_mask = (subsequent_mask == 0).unsqueeze(1)
-        subsequent_mask = subsequent_mask.long() # (1, 1, seq_len, seq_len)
-
-        extended_attention_mask = extended_attention_mask * subsequent_mask # (batch_size, 1, max_len, max_len)
-        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-        extended_attention_mask = extended_attention_mask.to(self.device)
-        return extended_attention_mask # (batch_size, 1, max_len, max_len)
-    
-    def augment(self, question_seq, ans_seq, ques_seq_len):
-        aug_question_seq1 = []
-        aug_ans_seq1 = []
-        aug_len1 = []
-        aug_question_seq2 = []
-        aug_ans_seq2 = []
-        aug_len2 = []
-        for question, ans, length in zip(question_seq, ans_seq, ques_seq_len):
-            if length > 1:
-                switch = random.sample(range(3), k=2)
-            else:
-                switch = [3, 3]
-                aug_question_seq = question
-                aug_ans_seq = ans
-                aug_len = length
-            if switch[0] == 0:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_crop(question, ans, length)
-            elif switch[0] == 1:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_mask(question, ans, length)
-            elif switch[0] == 2:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_reorder(question, ans, length)
+    def __init__(self, n_question, n_pid, d_model, n_blocks,
+                 kq_same, dropout, model_type, final_fc_dim=512, n_heads=8, d_ff=2048,  l2=1e-5, separate_qa=False):
+        super().__init__()
+        """
+        Input:
+            d_model: dimension of attention block
+            final_fc_dim: dimension of final fully connected net before prediction
+            n_heads: number of heads in multi-headed attention
+            d_ff : dimension for fully conntected net inside the basic block
+        """
+        self.n_question = n_question
+        self.dropout = dropout
+        self.kq_same = kq_same
+        self.n_pid = n_pid
+        self.l2 = l2
+        self.model_type = model_type
+        self.separate_qa = separate_qa
+        embed_l = d_model
+        if self.n_pid > 0:
+            self.s_embed = nn.Embedding(self.n_question + 1, embed_l)
+            self.p_embed = nn.Embedding(self.n_pid+1, embed_l)
+            self.has_warmup = False
+        if self.separate_qa:
+            self.qa_embed = nn.Embedding(2*self.n_question+1, embed_l)
+        else:
+            self.pa_embed = nn.Embedding(2, embed_l)
             
-            aug_question_seq1.append(aug_question_seq)
-            aug_ans_seq1.append(aug_ans_seq)
-            aug_len1.append(aug_len)
+        # Architecture Object. It contains stack of attention block
+        self.model = Architecture(n_question=n_question, n_blocks=n_blocks, n_heads=n_heads, dropout=dropout,
+                                    d_model=d_model, d_feature=d_model / n_heads, d_ff=d_ff,  kq_same=self.kq_same, model_type=self.model_type)
+
+        self.out = nn.Sequential(
+            nn.Linear(d_model + embed_l,
+                      final_fc_dim), nn.ReLU(), nn.Dropout(self.dropout),
+            nn.Linear(final_fc_dim, 256), nn.ReLU(
+            ), nn.Dropout(self.dropout),
+            nn.Linear(256, 1)
+        )
+             
+        ###### TODO, problem difficulty
+        self.diff_extract = nn.Sequential(
+            nn.Linear(embed_l, embed_l), nn.ReLU(), nn.Dropout(0.5)
+        )
+        self.diff_cls = nn.Linear(embed_l, 1)
+        self.mse_loss = nn.MSELoss()
+        ###### 
+        
+                
+    def warmup(self):
+        set_seed(42) 
+        nn.init.normal_(self.p_embed.weight, mean=0, std=0.1)
+        model = nn.ModuleList([self.diff_extract, self.diff_cls, self.p_embed])
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        pid_difficulty_labels = torch.FloatTensor(np.load(f'data/{Config.dataset}/question_difficulty.npy')).to(device)
+        
+        for epoch in range(50):
+            model.train()
+            pro_final_embed = self.diff_extract(self.p_embed.weight[1:])
+            p = self.diff_cls(pro_final_embed).reshape(-1)
+            mse_loss = self.mse_loss(p, pid_difficulty_labels)
+            optimizer.zero_grad()
+            mse_loss.backward()
+            optimizer.step()
+            # print(f"epoch {epoch}, train_loss {mse_loss}")
+        with torch.no_grad():
+            model.eval()
+            pro_final_embed = self.diff_extract(self.p_embed.weight)
+            self.p_embed.weight.requires_grad = False
+            # np.savez(f"{Config.dataset}_embedding.npz", pro_final_repre=pro_final_embed[1:].cpu().numpy())
+    
+    def get_cl_loss(self, z1, z2, mask):
+        cos = nn.CosineSimilarity(dim=-1)
+        cl_loss_fn = nn.CrossEntropyLoss(reduction="mean")
+        pooled_z1 = (z1 * mask.unsqueeze(-1)).sum(1) / mask.sum(-1).unsqueeze(-1) # (bs, embed_l)
+        pooled_z2 = (z2 * mask.unsqueeze(-1)).sum(1) / mask.sum(-1).unsqueeze(-1) # (bs, embed_l)
+        
+        sim = cos(pooled_z1.unsqueeze(1), pooled_z2.unsqueeze(0))
+        labels = torch.arange(sim.shape[0]).long().cuda()
+        cl_loss = cl_loss_fn(sim, labels)
+ 
+        return cl_loss
+    
+    
+    def forward(self, q_data, pa_data, target, pid_data=None, return_output=False):
+        if not self.has_warmup:
+            print("warmuping...")
+            self.warmup()
+            self.has_warmup = True
+            print("warmup done")
             
-            if switch[1] == 0:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_crop(question, ans, length)
-            elif switch[1] == 1:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_mask(question, ans, length)
-            elif switch[1] == 2:
-                aug_question_seq, aug_ans_seq, aug_len = self.question_reorder(question, ans, length)
-
-            aug_question_seq2.append(aug_question_seq)
-            aug_ans_seq2.append(aug_ans_seq)
-            aug_len2.append(aug_len)
+        # Batch First
+        p_embed_data = self.p_embed(pid_data)  # BS, seqlen,  d_model # c_ct
+        s_embed_data = self.s_embed(q_data)  # BS, seqlen, d_model # c_ct
         
-        return torch.stack(aug_question_seq1), torch.stack(aug_ans_seq1), torch.stack(aug_len1), \
-            torch.stack(aug_question_seq2), torch.stack(aug_ans_seq2), torch.stack(aug_len2)
-    
-    def question_crop(self, question_seq, ans_seq, question_seq_len, eta=0.6):
-        num_left = math.floor(question_seq_len * eta)
-        crop_begin = random.randint(0, question_seq_len - num_left)
-        croped_question_seq = np.zeros(question_seq.shape[0])
-        croped_ans_seq = np.zeros(ans_seq.shape[0])
-        if crop_begin + num_left < question_seq.shape[0]:
-            croped_question_seq[:num_left] = question_seq.cpu().detach().numpy()[crop_begin:crop_begin + num_left]
-            croped_ans_seq[:num_left] = ans_seq.cpu().detach().numpy()[crop_begin:crop_begin + num_left]
+        p_embed_data = p_embed_data + s_embed_data
+                
+        pa_data = (pa_data-q_data)//self.n_question
+        pa_embed_data = self.pa_embed(pa_data) + p_embed_data
+        
+        # import ipdb; ipdb.set_trace()
+        d_output = self.model(p_embed_data, pa_embed_data)  # 211x512
+
+        concat_p = torch.cat([d_output, p_embed_data], dim=-1)
+        output_hidden = self.out(concat_p)
+        
+        labels = target.reshape(-1)
+        m = nn.Sigmoid()
+        preds = (output_hidden.reshape(-1))  # logit
+        mask = labels > -0.9
+        masked_labels = labels[mask].float()
+        masked_preds = preds[mask]
+        loss = nn.BCEWithLogitsLoss(reduction='none')
+        output = loss(masked_preds, masked_labels)
+        
+        ###### TODO, CL 
+        # import ipdb; ipdb.set_trace()
+        z1 = self.model(p_embed_data, pa_embed_data, pertubed=True, eps=0.2) # (bs, seqlen, d_model)
+        z2 = self.model(p_embed_data, pa_embed_data, pertubed=True, eps=0.2) # (bs, seqle, d_model)
+        cl_loss = self.get_cl_loss(z1, z2, target >= 0)
+        if not return_output:
+            return output.sum() + 0.1 * cl_loss , m(preds), mask.sum()
         else:
-            croped_question_seq[:num_left] = question_seq.cpu().detach().numpy()[crop_begin:]
-            croped_ans_seq[:num_left] = ans_seq.cpu().detach().numpy()[crop_begin:]
-        return torch.tensor(croped_question_seq, dtype=torch.long, device=self.device),\
-                torch.tensor(croped_ans_seq, dtype=torch.long, device=self.device),\
-               torch.tensor(num_left, dtype=torch.long, device=self.device)
+            return output.sum() + 0.1 * cl_loss , m(preds), mask.sum(), d_output
 
-    def question_mask(self, question_seq, ans_seq, question_seq_len, gamma=0.3):
-        num_mask = math.floor(question_seq_len * gamma)
-        mask_index = random.sample(range(question_seq_len), k=num_mask)
-        masked_question_seq = question_seq.cpu().detach().numpy().copy()
-        masked_question_seq[mask_index] = self.n_questions  # token 0 has been used for semantic masking
-        masked_ans_seq = ans_seq.cpu().detach().numpy().copy()
-        masked_ans_seq[mask_index] = [1 for _ in range(len(mask_index))]
-        # masked_ans_seq[mask_index] = self.n_questions  # token 0 has been used for semantic masking
-        return torch.tensor(masked_question_seq, dtype=torch.long, device=self.device),\
-                torch.tensor(masked_ans_seq, dtype=torch.long, device=self.device),\
-                question_seq_len
 
-    def question_reorder(self, question_seq, ans_seq, question_seq_len, beta=0.3):
-        num_reorder = math.floor(question_seq_len * beta)
-        reorder_begin = random.randint(0, question_seq_len - num_reorder)
-        reordered_question_seq = question_seq.cpu().detach().numpy().copy()
-        shuffle_index = list(range(reorder_begin, reorder_begin + num_reorder))
-        random.shuffle(shuffle_index)
-        reordered_question_seq[reorder_begin:reorder_begin + num_reorder] = reordered_question_seq[shuffle_index]
+class Architecture(nn.Module):
+    def __init__(self, n_question,  n_blocks, d_model, d_feature,
+                 d_ff, n_heads, dropout, kq_same, model_type):
+        super().__init__()
+        """
+            n_block : number of stacked blocks in the attention
+            d_model : dimension of attention input/output
+            d_feature : dimension of input in each of the multi-head attention part.
+            n_head : number of heads. n_heads*d_feature = d_model
+        """
+        self.d_model = d_model
+        self.model_type = model_type
+
+        if model_type in {'DACE'}:
+            self.blocks_1 = nn.ModuleList([
+                TransformerLayer(d_model=d_model, d_feature=d_model // n_heads,
+                                 d_ff=d_ff, dropout=dropout, n_heads=n_heads, kq_same=kq_same)
+                for _ in range(n_blocks)
+            ])
+            self.blocks_2 = nn.ModuleList([
+                TransformerLayer(d_model=d_model, d_feature=d_model // n_heads,
+                                 d_ff=d_ff, dropout=dropout, n_heads=n_heads, kq_same=kq_same)
+                for _ in range(n_blocks*2)
+            ])
+
+    def forward(self, q_embed_data, qa_embed_data, pertubed=False, eps=0.1):
+        # target shape  bs, seqlen
+        seqlen, batch_size = q_embed_data.size(1), q_embed_data.size(0)
+
+        qa_pos_embed = qa_embed_data
+        q_pos_embed = q_embed_data
+
+        y = qa_pos_embed
+        seqlen, batch_size = y.size(1), y.size(0)
+        x = q_pos_embed
+
+        ####### TDOO, pertubed
+        if pertubed:
+            x_shuffle_idx = torch.randperm(x.shape[0]).to(device)
+            y_shuffle_idx = torch.randperm(y.shape[0]).to(device)
+            
+            x_shuffle = x[x_shuffle_idx]
+            y_shuffle = y[y_shuffle_idx]
+            
+            x = x + F.normalize(x_shuffle, p=2, dim=-1) * eps
+            y = y + F.normalize(y_shuffle, p=2, dim=-1) * eps
         
-        reordered_ans_seq = ans_seq.cpu().detach().numpy().copy()
-        reordered_ans_seq[reorder_begin:reorder_begin + num_reorder] = reordered_ans_seq[shuffle_index]
-        return torch.tensor(reordered_question_seq, dtype=torch.long, device=self.device), \
-                torch.tensor(reordered_ans_seq, dtype=torch.long, device=self.device), \
-                question_seq_len
+        # encoder
+        for block in self.blocks_1:  # encode qas
+            y = block(mask=1, query=y, key=y, values=y)
+            if pertubed:
+                y_shuffle_idx = torch.randperm(y.shape[0]).to(device)
+                y_shuffle = y[y_shuffle_idx]
+                # random_noise = torch.randn_like(y).cuda()
+                y = y + F.normalize(y_shuffle, p=2, dim=-1) * eps
+                
+        flag_first = True
+        for block in self.blocks_2:
+            if flag_first:  # peek current question
+                x = block(mask=1, query=x, key=x,
+                          values=x, apply_pos=False)
+                flag_first = False
+                if pertubed:
+                    x_shuffle_idx = torch.randperm(x.shape[0]).to(device)
+                    x_shuffle = x[x_shuffle_idx]
+                    x = x + F.normalize(x_shuffle, p=2, dim=-1) * eps
+            else:  # dont peek current response
+                x = block(mask=0, query=x, key=x, values=y, apply_pos=True)
+                flag_first = True
+                if pertubed:
+                    x_shuffle_idx = torch.randperm(x.shape[0]).to(device)
+                    x_shuffle = x[x_shuffle_idx]
+                    x = x + F.normalize(x_shuffle, p=2, dim=-1) * eps
+        return x
 
-    def forward(self, question_seq, ans_seq, question_seq_len, mode='specific'):
-        # question_seq: [batch_size, seq_len]
-        # ans_seq: [batch_size, seq_len]
-        # question_seq_len: [batch_size]
-        position_ids = torch.arange(question_seq.size(1), dtype=torch.long, device=self.device) # [seq_len]
-        position_ids = position_ids.unsqueeze(0).expand_as(question_seq)    # [batch_size, seq_len]
-        position_embedding = self.position_embedding(position_ids)  # [batch_size, seq_len, embed_dim]
-        if mode == 'specific':
-            question_emb = self.question_embedding(question_seq)    # [batch_size, seq_len, embed_dim]
-        elif mode == 'general': 
-            # import ipdb; ipdb.set_trace()
-            question_emb = F.embedding(question_seq, self.general_question_embedding, padding_idx=0) 
-        
-        ans_emb = self.ans_embedding(ans_seq )    # [batch_size, seq_len, embed_dim]
-        input_emb = question_emb + position_embedding + ans_emb # [(ques, ans), ] -> [ques1, ques2], [ans1, ans2]
-        input_emb = self.LayerNorm(input_emb)
-        input_emb = self.dropout(input_emb)
 
-        extended_attention_mask = self.get_attention_mask(question_seq) # [batch_size, 1, seq_len, seq_len]
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model, d_feature,
+                 d_ff, n_heads, dropout,  kq_same):
+        super().__init__()
+        """
+            This is a Basic Block of Transformer paper. It containts one Multi-head attention object. Followed by layer norm and postion wise feedforward net and dropout layer.
+        """
+        kq_same = kq_same == 1
+        # Multi-Head Attention Block
+        self.masked_attn_head = MultiHeadAttention(
+            d_model, d_feature, n_heads, dropout, kq_same=kq_same)
 
-        trm_output = self.trm_encoder(input_emb, extended_attention_mask, output_all_encoded_layers=True)   # list, 2
-        # trm_output[0]: [batch_size, seq_len, embed_dim]
-        output = trm_output[-1] # [batch_size, seq_len, embed_dim]
-        sequence_output = self.gather_indexes(output, question_seq_len - 1)  # [batch_size, embed_dim]
-        return output, sequence_output  # [batch_size, embed_dim]
-   
-    # def ssl_compute(self, embedded_s1, embedded_s2):
-    #     normalized_embedded_s1 = F.normalize(embedded_s1)
-    #     normalized_embedded_s2 = F.normalize(embedded_s2)
-    #     # batch_size
-    #     pos_score = torch.sum(torch.mul(normalized_embedded_s1, normalized_embedded_s2), dim=1, keepdim=False)
-    #     # batch_size * batch_size
-    #     all_score = torch.mm(normalized_embedded_s1, normalized_embedded_s2.t())
-    #     ssl_mi = torch.log(torch.exp(pos_score/self.tau) / torch.exp(all_score/self.tau).sum(dim=1, keepdim=False)).mean()
-    #     return ssl_mi
-   
-    def get_sequence_preds_targets(self, out, targets_ans, seq_len):
-        '''
-        out: (batch_size, max_len - 1, 1)
-        seq_len: (batch_size, )
-        targets_ans: (batch_size, max_len - 1, 1)
-        '''
-        pred, truth = [], []
-        for i, len_i in enumerate(seq_len):  # 每个学生，len_i个记录
-            pred_y = out[i][:len_i].squeeze()  # 前 len_i - 1个学生知识状态 # (len_i - 1, )
-            target_y = targets_ans[i][:len_i] #(len_i - 1)
-            pred.append(pred_y)
-            # pred.append(torch.gather(out_seq, 1, select_idx - 1))
-            truth.append(target_y)
-        preds = torch.cat(pred).squeeze().float()
-        truths = torch.cat(truth).float()
-        return preds, truths
-    
-    def seq_contrastive_loss(self, question_seq, ans_seq, question_seq_len, mode='general'):
-        aug_question_seq1, aug_ans_seq1, aug_len1, aug_question_seq2, aug_ans_seq2, aug_len2 = self.augment(question_seq, ans_seq, question_seq_len)
-        
-        _, seq_output1 = self.forward(aug_question_seq1, aug_ans_seq1, aug_len1, mode)  # [batch_size, embed_dim]
-        _, seq_output2 = self.forward(aug_question_seq2, aug_ans_seq2, aug_len2, mode)  # [batch_size, embed_dim]
-    
-        nce_logits, nce_labels = self.info_nce(seq_output1, seq_output2, temp=self.tau, batch_size=aug_len1.shape[0], sim=self.sim)
-        nce_loss= self.nce_fct(nce_logits, nce_labels)
-        return nce_loss
-    
-    def get_output(self, question_seq, ans_seq, question_seq_len, output_embedding=False):
-        '''
-        return:
-        task preds: [B, L - 1] 
-        student output: [B, L - 1, H] 
-        '''
-        output, _ = self.forward(question_seq, ans_seq, question_seq_len, mode='specific')
-        student_output = output[:, :-1, :] # [batch_size, seq_len - 1, embed_dim]
-        query_pro_embedding = F.embedding(question_seq, self.general_question_embedding, padding_idx=0)[:, 1:, :] # [batch_size, seq_len - 1, embed_dim]
-        task_input = torch.cat([student_output, query_pro_embedding], axis=-1) # [batch_size, seq_len - 1, embed_dim * 2]
-        
+        # Two layer norm layer and two droput layer
+        self.layer_norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
 
-        task_preds = torch.sigmoid(self.task_head(task_input)).squeeze() # [batch_size, seq_len - 1]
-        if output_embedding:
-            return task_preds, student_output
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.activation = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_ff, d_model)
+
+        self.layer_norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, mask, query, key, values, apply_pos=True):
+        """
+        Input:
+            block : object of type BasicBlock(nn.Module). It contains masked_attn_head objects which is of type MultiHeadAttention(nn.Module).
+            mask : 0 means, it can peek only past values. 1 means, block can peek only current and pas values
+            query : Query. In transformer paper it is the input for both encoder and decoder
+            key : Keys. In transformer paper it is the input for both encoder and decoder
+            Values. In transformer paper it is the input for encoder and  encoded output for decoder (in masked attention part)
+
+        Output:
+            query: Input gets changed over the layer and returned.
+
+        """
+
+        seqlen, batch_size = query.size(1), query.size(0)
+        nopeek_mask = np.triu(
+            np.ones((1, 1, seqlen, seqlen)), k=mask).astype('uint8')
+        src_mask = (torch.from_numpy(nopeek_mask) == 0).to(device)
+        if mask == 0:  # If 0, zero-padding is needed.
+            # Calls block.masked_attn_head.forward() method
+            query2 = self.masked_attn_head(
+                query, key, values, mask=src_mask, zero_pad=True)
         else:
-            return task_preds
-        
-    def task_loss(self, output, question_seq, ans_seq, question_seq_len, mode='specific'):
-        '''
-        output: (batch_size, seq_len)
-        question_seq: (batch_size, seq_len)
-        ans_seq: (batch_size, max_len, )
-        question_seq_len: (batch_size, )
-        '''
-        # import ipdb; ipdb.set_trace()
-        student_output = output[:, :-1, :] # [batch_size, seq_len-1, embed_dim]
-        if mode == 'specific':
-            query_pro_embedding = self.question_embedding(question_seq)[:, 1:, :] # [batch_size, seq_len - 1, embed_dim]
-        elif mode == 'general':
-            query_pro_embedding = F.embedding(question_seq, self.general_question_embedding, padding_idx=0)[:, 1:, :] # [batch_size, seq_len - 1, embed_dim]
-        elif mode == 'mix':
-            query_pro_embedding = F.embedding(question_seq, self.general_question_embedding + self.question_embedding.weight, padding_idx=0)[:, 1:, :]
-        
-        task_input = torch.cat([student_output, query_pro_embedding], axis=-1) # [batch_size, seq_len - 1, embed_dim * 2]
-        task_preds = torch.sigmoid(self.task_head(task_input)).squeeze() # [batch_size, seq_len - 1]
+            # Calls block.masked_attn_head.forward() method
+            query2 = self.masked_attn_head(
+                query, key, values, mask=src_mask, zero_pad=False)
 
-        # import ipdb; ipdb.set_trace()
-        preds, truths = self.get_sequence_preds_targets(task_preds, ans_seq[:, 1:], question_seq_len - 1)
-        task_loss = self.bce_fct(preds, truths)
-        return task_loss
+        query = query + self.dropout1((query2))
+        query = self.layer_norm1(query)
+        if apply_pos:
+            query2 = self.linear2(self.dropout(
+                self.activation(self.linear1(query))))
+            query = query + self.dropout2((query2))
+            query = self.layer_norm2(query)
+        return query
 
-    def calculate_loss(self, question_seq, ans_seq, question_seq_len):  
-        '''
-        question_seq: [batch_size, seq_len]
-        ans_seq: [batch_size, seq_len]
-        question_seq_len: [batch_size, ]
-        '''
-        
-        output, seq_output = self.forward(question_seq, ans_seq, question_seq_len, 'specific')   # [batch_size, seq_len, embed_dim],  [batch_size, embed_dim] 
-        
-        # general_output, general_seq_output = self.forward(question_seq, ans_seq, question_seq_len, mode='general') # [batch_size, seq_len, embed_dim],  [batch_size, embed_dim] 
-        # import ipdb; ipdb.set_trace()
-        # general_ans_seq = torch.ones(ans_seq.shape).long().to(self.device)
-        # general_output, general_seq_output = self.forward(question_seq, general_ans_seq, question_seq_len, mode='general') # [batch_size, seq_len, embed_dim],  [batch_size, embed_dim] 
 
-        # 1. task loss, max(S_tilde, Y), max(S_overline, Y)
-        # import ipdb; ipdb.set_trace()
-        # specific_task_loss = self.task_loss(output, question_seq, ans_seq, question_seq_len, 'general') 
-        general_task_loss = self.task_loss(output, question_seq, ans_seq, question_seq_len, 'specific') ### @answer全1
-        # general_task_loss = 0.0
-        # mix_task_loss = self.task_loss(general_output, question_seq, ans_seq, question_seq_len, 'mix') 
-        # mix_task_loss = 0.0
-
-        # task_loss = specific_task_loss + general_task_loss
-        
-        # 2.contrastive loss 
-        # specific_nce_loss = self.seq_contrastive_loss(question_seq, ans_seq, question_seq_len, 'specific')
-        general_nce_loss = self.seq_contrastive_loss(question_seq, ans_seq, question_seq_len, 'specific')
-        # general_nce_loss = self.seq_contrastive_loss(question_seq, general_ans_seq, question_seq_len, 'general')
-        # nce_loss = specific_nce_loss + general_nce_loss
-        
-        # 3. min I(S_tilde, S_hat)
-        # info_bn_loss = self.ssl_compute(seq_output, general_seq_output)
-        
-        # raw: task loss + nce loss
-        # return loss + self.lmd * nce_loss, alignment, uniformity
-        # return self.lmd1 * nce_loss +  self.lmd2 * info_bn_loss + self.lmd3 * (specific_task_loss + general_task_loss) + self.lmd4 * mix_task_loss 
-        # import ipdb; ipdb.set_trace()
-        return general_task_loss + 0.1 * general_nce_loss
-        # return general_task_loss
-
-    # def decompose(self, z_i, z_j, origin_z, batch_size):
-    #     """
-    #     We do not sample negative examples explicitly.
-    #     Instead, given a positive pair, similar to (Chen et al., 2017), we treat the other 2(N − 1) augmented examples within a minibatch as negative examples.
-    #     """
-    #     N = 2 * batch_size
-    
-    #     z = torch.cat((z_i, z_j), dim=0)
-    
-    #     # pairwise l2 distace
-    #     sim = torch.cdist(z, z, p=2)
-    
-    #     sim_i_j = torch.diag(sim, batch_size)
-    #     sim_j_i = torch.diag(sim, -batch_size)
-    
-    #     positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)
-    #     alignment = positive_samples.mean()
-    
-    #     # pairwise l2 distace
-    #     sim = torch.cdist(origin_z, origin_z, p=2)
-    #     mask = torch.ones((batch_size, batch_size), dtype=bool)
-    #     mask = mask.fill_diagonal_(0)
-    #     negative_samples = sim[mask].reshape(batch_size, -1)
-    #     uniformity = torch.log(torch.exp(-2 * negative_samples).mean())
-    
-    #     return alignment, uniformity
-    
-    def mask_correlated_samples(self, batch_size):
-        N = 2 * batch_size
-        mask = torch.ones((N, N), dtype=bool)
-        mask = mask.fill_diagonal_(0)
-        for i in range(batch_size):
-            mask[i, batch_size + i] = 0
-            mask[batch_size + i, i] = 0
-        return mask
-    
-    def info_nce(self, z_i, z_j, temp, batch_size, sim='dot'):
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, d_feature, n_heads, dropout, kq_same, bias=True):
+        super().__init__()
         """
-        We do not sample negative examples explicitly.
-        Instead, given a positive pair, similar to (Chen et al., 2017), we treat the other 2(N − 1) augmented examples within a minibatch as negative examples.
+        It has projection layer for getting keys, queries and values. Followed by attention and a connected layer.
         """
-        '''
-        z_i : (batch_size, embed_dim)
-        z_j : (batch_size, embed_dim)
-        '''
-        N = 2 * batch_size
-    
-        z = torch.cat((z_i, z_j), dim=0) # (2 * batch_size, embed_dim)
-    
-        if sim == 'cos':
-            sim = nn.functional.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=2) / temp
-        elif sim == 'dot':
-            sim = torch.mm(z, z.T) / temp # (2 * batch_size, 2 * batch_size)
-    
-        sim_i_j = torch.diag(sim, batch_size)
-        sim_j_i = torch.diag(sim, -batch_size)
-    
-        positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1) # (2 * batch_size, 1)
-        if batch_size != self.batch_size:
-            mask = self.mask_correlated_samples(batch_size)
+        self.d_model = d_model
+        self.d_k = d_feature
+        self.h = n_heads
+        self.kq_same = kq_same
+
+        self.v_linear = nn.Linear(d_model, d_model, bias=bias)
+        self.k_linear = nn.Linear(d_model, d_model, bias=bias)
+        if kq_same is False:
+            self.q_linear = nn.Linear(d_model, d_model, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+        self.proj_bias = bias
+        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.gammas = nn.Parameter(torch.zeros(n_heads, 1, 1))
+        torch.nn.init.xavier_uniform_(self.gammas)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        xavier_uniform_(self.k_linear.weight)
+        xavier_uniform_(self.v_linear.weight)
+        if self.kq_same is False:
+            xavier_uniform_(self.q_linear.weight)
+
+        if self.proj_bias:
+            constant_(self.k_linear.bias, 0.)
+            constant_(self.v_linear.bias, 0.)
+            if self.kq_same is False:
+                constant_(self.q_linear.bias, 0.)
+            constant_(self.out_proj.bias, 0.)
+
+    def forward(self, q, k, v, mask, zero_pad):
+
+        bs = q.size(0)
+
+        # perform linear operation and split into h heads
+
+        k = self.k_linear(k).view(bs, -1, self.h, self.d_k)
+        if self.kq_same is False:
+            q = self.q_linear(q).view(bs, -1, self.h, self.d_k)
         else:
-            mask = self.mask_default
-        negative_samples = sim[mask].reshape(N, -1) # (2 * batch_size, 2 * batch_size - 2)
-    
-        labels = torch.zeros(N).to(self.device).long()
-        logits = torch.cat((positive_samples, negative_samples), dim=1)
-        return logits, labels
+            q = self.k_linear(q).view(bs, -1, self.h, self.d_k)
+        v = self.v_linear(v).view(bs, -1, self.h, self.d_k)
 
-    def gather_indexes(self, output, gather_index):
-        """Gathers the vectors at the specific positions over a minibatch"""
-        gather_index = gather_index.view(-1, 1, 1).expand(-1, -1, output.shape[-1])
-        output_tensor = output.gather(dim=1, index=gather_index)
-        return output_tensor.squeeze(1)
-      
-    def __str__(self):
-        """
-        Model prints with number of trainable parameters
-        """
-        model_parameters = filter(lambda p: p.requires_grad, self.parameters())
-        params = sum([np.prod(p.size()) for p in model_parameters])
-        return super().__str__() + '\nTrainable parameters' + f': {params}'
+        # transpose to get dimensions bs * h * sl * d_model
+
+        k = k.transpose(1, 2)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+        # calculate attention using function we will define next
+        gammas = self.gammas
+        scores = attention(q, k, v, self.d_k,
+                           mask, self.dropout, zero_pad, gammas)
+
+        # concatenate heads and put through final linear layer
+        concat = scores.transpose(1, 2).contiguous()\
+            .view(bs, -1, self.d_model)
+
+        output = self.out_proj(concat)
+
+        return output
+
+
+def attention(q, k, v, d_k, mask, dropout, zero_pad, gamma=None):
+    """
+    This is called by Multi-head atention object to find the values.
+    """
+    scores = torch.matmul(q, k.transpose(-2, -1)) / \
+        math.sqrt(d_k)  # BS, 8, seqlen, seqlen
+    bs, head, seqlen = scores.size(0), scores.size(1), scores.size(2)
+
+    x1 = torch.arange(seqlen).expand(seqlen, -1).to(device)
+    x2 = x1.transpose(0, 1).contiguous()
     
+    with torch.no_grad():
+        scores_ = scores.masked_fill(mask == 0, -1e32)
+        scores_ = F.softmax(scores_, dim=-1)  # BS,8,seqlen,seqlen
+        scores_ = scores_ * mask.float().to(device)
+        distcum_scores = torch.cumsum(scores_, dim=-1)  # bs, 8, sl, sl
+        disttotal_scores = torch.sum(
+            scores_, dim=-1, keepdim=True)  # bs, 8, sl, 1
+        position_effect = torch.abs(
+            x1-x2)[None, None, :, :].type(torch.FloatTensor).to(device)  # 1, 1, seqlen, seqlen
+        # bs, 8, sl, sl positive distance
+        dist_scores = torch.clamp(
+            (disttotal_scores-distcum_scores)*position_effect, min=0.)
+        dist_scores = dist_scores.sqrt().detach()
+    m = nn.Softplus()
+    gamma = -1. * m(gamma).unsqueeze(0)  # 1,8,1,1
+    # Now after do exp(gamma*distance) and then clamp to 1e-5 to 1e5
+    total_effect = torch.clamp(torch.clamp(
+        (dist_scores*gamma).exp(), min=1e-5), max=1e5)
+    # import ipdb; ipdb.set_trace()
+    scores = scores * total_effect
+
+    scores.masked_fill_(mask == 0, -1e32)
+    scores = F.softmax(scores, dim=-1)  # BS,8,seqlen,seqlen
+    # import ipdb; ipdb.set_trace()
+    if zero_pad:
+        pad_zero = torch.zeros(bs, head, 1, seqlen).to(device)
+        scores = torch.cat([pad_zero, scores[:, :, 1:, :]], dim=2)
+    scores = dropout(scores)
+    output = torch.matmul(scores, v)
+    return output
+
+
+class LearnablePositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        # Compute the positional encodings once in log space.
+        pe = 0.1 * torch.randn(max_len, d_model)
+        pe = pe.unsqueeze(0)
+        self.weight = nn.Parameter(pe, requires_grad=True)
+
+    def forward(self, x):
+        return self.weight[:, :x.size(Dim.seq), :]  # ( 1,seq,  Feature)
+
+
+class CosinePositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        # Compute the positional encodings once in log space.
+        pe = 0.1 * torch.randn(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() *
+                             -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.weight = nn.Parameter(pe, requires_grad=False)
+
+    def forward(self, x):
+        return self.weight[:, :x.size(Dim.seq), :]  # ( 1,seq,  Feature)
