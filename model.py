@@ -1,3 +1,4 @@
+# Code reused from https://github.com/arghosh/AKT.git
 import torch
 from torch import nn
 from torch.nn.init import xavier_uniform_
@@ -53,11 +54,11 @@ class DACE(nn.Module):
         self.l2 = l2
         self.model_type = model_type
         self.separate_qa = separate_qa
+        self.device = device
         embed_l = d_model
         if self.n_pid > 0:
             self.s_embed = nn.Embedding(self.n_question + 1, embed_l)
             self.p_embed = nn.Embedding(self.n_pid+1, embed_l)
-            self.has_warmup = False
         if self.separate_qa:
             self.qa_embed = nn.Embedding(2*self.n_question+1, embed_l)
         else:
@@ -74,38 +75,8 @@ class DACE(nn.Module):
             ), nn.Dropout(self.dropout),
             nn.Linear(256, 1)
         )
+        init(self)
              
-        ###### TODO, problem difficulty
-        self.diff_extract = nn.Sequential(
-            nn.Linear(embed_l, embed_l), nn.ReLU(), nn.Dropout(0.5)
-        )
-        self.diff_cls = nn.Linear(embed_l, 1)
-        self.mse_loss = nn.MSELoss()
-        ###### 
-        
-                
-    def warmup(self):
-        set_seed(42) 
-        nn.init.normal_(self.p_embed.weight, mean=0, std=0.1)
-        model = nn.ModuleList([self.diff_extract, self.diff_cls, self.p_embed])
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        pid_difficulty_labels = torch.FloatTensor(np.load(f'data/{Config.dataset}/question_difficulty.npy')).to(device)
-        
-        for epoch in range(50):
-            model.train()
-            pro_final_embed = self.diff_extract(self.p_embed.weight[1:])
-            p = self.diff_cls(pro_final_embed).reshape(-1)
-            mse_loss = self.mse_loss(p, pid_difficulty_labels)
-            optimizer.zero_grad()
-            mse_loss.backward()
-            optimizer.step()
-            # print(f"epoch {epoch}, train_loss {mse_loss}")
-        with torch.no_grad():
-            model.eval()
-            pro_final_embed = self.diff_extract(self.p_embed.weight)
-            self.p_embed.weight.requires_grad = False
-            # np.savez(f"{Config.dataset}_embedding.npz", pro_final_repre=pro_final_embed[1:].cpu().numpy())
-    
     def get_cl_loss(self, z1, z2, mask):
         cos = nn.CosineSimilarity(dim=-1)
         cl_loss_fn = nn.CrossEntropyLoss(reduction="mean")
@@ -120,12 +91,7 @@ class DACE(nn.Module):
     
     
     def forward(self, q_data, pa_data, target, pid_data=None, return_output=False):
-        if not self.has_warmup:
-            print("warmuping...")
-            self.warmup()
-            self.has_warmup = True
-            print("warmup done")
-            
+        
         # Batch First
         p_embed_data = self.p_embed(pid_data)  # BS, seqlen,  d_model # c_ct
         s_embed_data = self.s_embed(q_data)  # BS, seqlen, d_model # c_ct
@@ -134,8 +100,7 @@ class DACE(nn.Module):
                 
         pa_data = (pa_data-q_data)//self.n_question
         pa_embed_data = self.pa_embed(pa_data) + p_embed_data
-        
-        # import ipdb; ipdb.set_trace()
+
         d_output = self.model(p_embed_data, pa_embed_data)  # 211x512
 
         concat_p = torch.cat([d_output, p_embed_data], dim=-1)
@@ -150,8 +115,7 @@ class DACE(nn.Module):
         loss = nn.BCEWithLogitsLoss(reduction='none')
         output = loss(masked_preds, masked_labels)
         
-        ###### TODO, CL 
-        # import ipdb; ipdb.set_trace()
+        ### contrastive learning 
         z1 = self.model(p_embed_data, pa_embed_data, pertubed=True, eps=0.2) # (bs, seqlen, d_model)
         z2 = self.model(p_embed_data, pa_embed_data, pertubed=True, eps=0.2) # (bs, seqle, d_model)
         cl_loss = self.get_cl_loss(z1, z2, target >= 0)
@@ -159,7 +123,6 @@ class DACE(nn.Module):
             return output.sum() + 0.1 * cl_loss , m(preds), mask.sum()
         else:
             return output.sum() + 0.1 * cl_loss , m(preds), mask.sum(), d_output
-
 
 class Architecture(nn.Module):
     def __init__(self, n_question,  n_blocks, d_model, d_feature,
@@ -197,7 +160,6 @@ class Architecture(nn.Module):
         seqlen, batch_size = y.size(1), y.size(0)
         x = q_pos_embed
 
-        ####### TDOO, pertubed
         if pertubed:
             x_shuffle_idx = torch.randperm(x.shape[0]).to(device)
             y_shuffle_idx = torch.randperm(y.shape[0]).to(device)
@@ -436,3 +398,28 @@ class CosinePositionalEmbedding(nn.Module):
 
     def forward(self, x):
         return self.weight[:, :x.size(Dim.seq), :]  # ( 1,seq,  Feature)
+
+def init(model):
+    model = model.to(device)
+    embed_l = model.p_embed.weight.shape[1]
+    diff_pred = nn.Sequential(
+            nn.Linear(embed_l, embed_l), nn.ReLU(), nn.Dropout(0.5), nn.Linear(embed_l, 1)
+        ).to(device)
+    loss_func = nn.MSELoss()
+    # question difficulty warmup
+    if hasattr(model, "warmup"):
+        return
+    model.warmup = True  
+    nn.init.normal_(model.p_embed.weight, mean=0, std=0.1)
+    params = nn.ModuleList([diff_pred, model.p_embed])
+    optimizer = torch.optim.Adam(params.parameters(), lr=0.001)
+    pid_difficulty_labels = torch.FloatTensor(np.load(f'data/{Config.dataset}/question_difficulty.npy')).to(device)
+    for epoch in range(50):
+        model.train()
+        p = diff_pred(model.p_embed.weight[1:]).reshape(-1)
+        mse_loss = loss_func(p, pid_difficulty_labels)
+        optimizer.zero_grad()
+        mse_loss.backward()
+        optimizer.step()
+    model.p_embed.weight.requires_grad = False # True
+           
